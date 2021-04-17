@@ -65,6 +65,8 @@ And the following matlab toolboxes:
 ## Example
 Two real-world [cohorts](https://doi.org/10.1371/journal.pone.0219738) are supplied with the toolbox and could be found in the file `ClinicalCohorts.mat`: `LHD_xy` and `RHD_xy` includes anatomic and behavioral (Fugl-Meyer Score, Upper limb) of 58 left-hemispheric and 49 right-hemispheric first-stroke patients, assesed in the subacute phase (between 1 to 3 months post-stroke). The Fugl-Meyer score of the upper limb range is [0, 66], whereas 66 is normal function. The region names were defined according to the [Automated Anatomic Labeling atlas (AAL)]( http://dx.doi.org/10.1006/nimg.2001.0978) and [White-matter atlas based on DTI](http://dx.doi.org/10.1016/j.neuroimage.2007.12.035). The variable `RegionNames` contains the name of each region, and file `parcellation.docx` describes the exact parcellation.
 
+You can also refer to the script `msa_demo.m` (which demonstates ground-truth simulation) to see some suggested ways for usage, as well as plotting of the results.
+
 Please contact many for any question:
 Shay Ofir-Geva: shinofir@gmail.com
 
