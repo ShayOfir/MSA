@@ -18,6 +18,8 @@ The current implementation of MSA uses a uses only coalitions with a certain (us
 # Technologies
 The toolbox was created and tested using:
 * Matlab R2019b (v9.7)
+and
+* Matlab R2020a (v9.8)
 
 And the following matlab toolboxes:
 * Statistics and Machine Learning Toolbox (v11.6)
@@ -26,7 +28,7 @@ And the following matlab toolboxes:
 
 # Usage
 
-<pre><code>[SV, Calib, coal, Bset, Lset] = PerformMSA (xy, pdepth, nBS, alpha [,alternative_predictor])
+<pre><code>[SV, Calib, coal, Bset, Lset] = PerformMSA (xy, pdepth, nBS, alpha, TOP, [optimization, alternative_predictor, normalization_op])
 </code></pre>
 
 ## Input:
@@ -34,7 +36,16 @@ And the following matlab toolboxes:
 * __pdepth__: perturbation depth, i.e. the maximal number of inactive regions in the computed coalition. A rule of thumb, use ~15% of your total number of regions. This number should be an integer between 1 and no. of regions - 1. I used pdepth=4 for 26 regions with relatively short computation time and relatively good accuracy. Please beware: pdepth > 12, espcially if no. of regions is >20, may lead to exhaustion of RAM, and will take very long to compute.
 * __nBS__: no. of bootstrap resamples. 0 = No statistical inference. -1 = Jacknife (leave-one-out method; less accurate); any number >0 : bootstrap method. 10,000 provide excellent results, but it seems that 1,000 is almost the same, with much shorter computation time. The number should be integer.
 * __alpha__:  Type-I error rate. float in the range [0, 1]. This parameter is ignored if nBS = 0
+* __TOP__: The score of an intact patient. Pay attention that PerformMSA() assumes that the score of highly-injured patient is 0.
+* __optimization__: 
+  -  'gpu' (default): use GPU if exist, else use parallel CPUs, else don't use parallelization; 
+  -  'par':  enforce use of parallel CPUs, even if GPU exists; 
+  -  'none': do not use any optimization (no parallel CPUs, no GPUs)
 * __alternative_predictor__: a predictor function which could be used with .predictFcn(XX) method, where XX is the 2D binary matrix of size of N rows (one row for each coalition) and M columns (one column for each region), where 0 means inactive region and 1 an active region (This is an advanced topic and will be addressed in the future. The interested user should refer the code and comments meanwhile).
+* __normalization_op__ : This option controls the scaling of lesion data. The options are:
+  - 0 - No scaling (NOT RECOMMENDED! Use it only if you apply your scaling before sending it to PerfromMSA().
+  - 1 - (Default) Each lesion coloumn is divided by its max 
+  - 2 - lesion columns are smoothed by dividing them by 10 and rounding before dividing by maximal value. This option is under investigation.
 
 ## Output:
 * __SV__ : Shapley Vector. This is actually a matrix with N rows and M columns, when N is pdepth and M is no. of regions. Each row is Shapley vector for a perturbation depth from 1 to pdepth. Hence, SV(end,:) will get you the Shapley-values for the requested pdepth.
