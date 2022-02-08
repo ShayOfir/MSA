@@ -25,6 +25,9 @@ function [SV, Calib, coal, Bset, Lset]=PerformMSA (xy, pdepth, nBS, alpha, TOP, 
 %
 %    alpha - type I error level. Default is 0.05
 %
+%    TOP - The score of an intact patient. Pay attention that PerformMSA
+%    assumes that the score of highly-injured patient is 0.
+%
 %    optmization: 'gpu' : use GPU if exist, else use parallel CPUs
 %    [Default]
 %                 'par'  : enforce use of parallel CPUs, even if GPU exists
