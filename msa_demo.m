@@ -1,67 +1,101 @@
 %MSA demo
 
-%Initialize:
-NR = 26; %No. of brain regions
-NP = 50; %No. of patients
-TOP = 4.5; %Maximal value of simulated behavior score
-pdepth = 4; %perturbation depth
-NDAM = 8; %maximum no. of lesioned regions
-%Ground-truth function: first six regions are fascilitatory, next 3 are
-%inhibitor and the rest are irrelevant
-VV=[ones(1,6) -0.5*ones(1,3) zeros(1,NR-9)]; 
-alpha = 0.05; %type-I error
+%Load clinical data
+dat = load('ClinicalCohorts.mat');
+%The MAT file contains the following variables:
+% LHD_xy = matrix of lesion and Fugl-Meyer Assessment score of the upper
+% limb of left-hemispheric damaged (LHD) patients 
+% RHD_xy = the same for right-hemispheric damaged (RHD) patients
+% RegionNames - cell-vector of strings which includes the region names of
+% the 26 preselected region-of-interest
+%
+% The input matrices should be contructed as follows:
+% Each row represents a patient. Each column (except of the last) represent
+% as brain region (in the same oreder as 'RegionNames'. Number represents
+% percents (0 to 100). I used double percision, but other percisions might
+% also work.
+% The last column is the behavioral score. The convention is that higher
+% numbers represent better performance, i.e. less impairment. Use
+% transformation to represnts the opposite (e.g. max-score - x)
+
+pdepth = 5;
+%Set perturbation depth (J) to 5. This means that only coalitions with 5
+%inactive regions or less would be taken into account.
+% WARNING: HIGH pdepths may require considerable computation time and may
+% exhoust RAM! To get some intuiation use can use nchoosek(K,J) where K is
+% the number of regions and J is perturbation depth. For the current
+% cohorts K = 26, hence J = 5 yields 83,681 different coalitions while J =
+% 10 will yield > 10M coalitions, putting high burden on system resources.
+ 
 nBS = 1000;
+%Set no. of bootstrap resamples to 1000. This is the minimal number that
+%yield good results. Higher number require linearly longer computation
+%time.
 
-WCOND=ones(NP,NR); %init
-rng(3); %For demonstration uniform numbers between different runs
-% Create virtual pseudo-lesions
-for i=2:NP
-    Z=1+floor(NR*rand(1,NDAM));
-    WCOND(i,Z)=rand(1,NDAM);
-end
+alpha = 0.05;
+%Set significance level to 0.05
 
-PERF=WCOND*VV'; %Compute ground-truth performance
-xy=[100*(1-WCOND), PERF]; %transform simulated data to the usual data format (numbers are percent and convey damage and not activity)
+TOP = 66;
+%TOP must be the expected score of an intact individual. The FMA spans between 0 and 66.
+%Pay attention that %zero is always the expected score a maximally injured patient. In case you
+%score minimum is not 0, it is advisiable to use a transformation (i.e.,
+%the result will represent the score that patient achieved above the
+%minimum)
 
-%Demo #1: Compute Shapley value with Leave-One-Out
-[SV, Calib, coal, ~, Lset]=PerformMSA (xy, pdepth, -1, alpha);
+optimize = 'gpu';
+%The code is planned to use GPU whenever possible, and if no GPU is detected it
+%uses parralel CPU cores. Only if these two are not possible classical
+%non-paralelized code is invoked. Use 'par' to enforce use of parallel CPU
+%cores and 'none' to enforce no-optimization
+
+%For the sake of demonstration, We use here only the right-hemispheric cohort. 
+
+%Demo #1: Compute Shapley value with Leave-One-Out (Jacknife method)
+[SV, Calib, ~, ~, Lset]=PerformMSA (RHD_xy, pdepth, -1, alpha, TOP, optimize);
+
 
 %Demo #2: Compute Shapley value with Bootstrap
-[SV, Calib, coal, Bset]=PerformMSA (xy, pdepth, nBS, alpha);
+[SV, Calib, ~, Bset]=PerformMSA (RHD_xy, pdepth, nBS, alpha, TOP, optimize);
 
+%There is some redundency, as Bset was added in subsequent stage. To get
+%the Shapley-vector information use can use SV (for raw SV) or Calib.SV
+%(for calibrated SV). Bset and Lset include in addition to the raw and calibrated
+% SVs also statistical data derived from jacknife/bootstrap methods. See
+% the help for PerformMSA.m for details.
 
+save ('msa_demo_data.mat');
 
 
 
 figure;
 %Bootstrapped, calibrated
 subplot(2,2,1);
-plotSVandGroundTruth(Bset, 1, 2, 0, alpha, VV);
+plotSV(Bset, 1, 2, 1, alpha, dat.RegionNames);
 ylabel ('Calibrated Shapley values');
 title ('Bootstrap');
 
 %Bootstrapped, raw
 subplot(2,2,2);
-plotSVandGroundTruth(Bset, 0, 2, 0, alpha, VV);
+plotSV(Bset, 0, 2, 1, alpha, dat.RegionNames);
 ylabel ('Raw Shapley values');
 title ('Bootstrap');
 
 
 %Leave-one-out, calibrated
 subplot(2,2,3);
-plotSVandGroundTruth(Lset, 1, 2, 0, alpha, VV);
+plotSV(Lset, 1, 2, 1, alpha, dat.RegionNames);
 ylabel ('Calibrated Shapley values');
 title ('Leave-one-out');
 
 
 %Leave-one-out, raw
 subplot(2,2,4);
-plotSVandGroundTruth(Lset, 0, 2, 0, alpha, VV);
+plotSV(Lset, 0, 2, 1, alpha, dat.RegionNames);
 ylabel ('Raw Shapley values');
 title ('Leave-one-out');
 
 
-function plotSVandGroundTruth (Bset, calib, fdr_flag, large_only_flag, alpha, VV)
+function plotSV (Bset, calib, fdr_flag, large_only_flag, alpha, RegionNames)
 
 [SV, SVci0, SVci, pval, Z, aver] = StatInference(Bset,calib);
 SVsd_pos = SVci - SV;
@@ -117,7 +151,8 @@ end
 h=line([0 Nreg+1],[0 0],'LineStyle',':','Color',[0.5 0.5 0.5],'LineWidth',LW);
 aa = h.Parent;
 hold on
-bar (SV,'FaceColor',[68/256, 114/256, 196/256],'LineWidth',LW);
+%bar (SV,'FaceColor',[68/256, 114/256, 196/256],'LineWidth',LW);
+plot (SV,'Color',[68/256, 114/256, 196/256],'LineWidth',LW);
 errorbar (xvec,SV,SVsd_pos,SVsd_neg,'k','LineWidth',LW,'LineStyle','none');               
 %a = h.Parent;        
 plot (xvec,ast_hi,'LineStyle','none','Marker','*','MarkerSize',12,'MarkerEdgeColor','k'); 
@@ -128,7 +163,9 @@ plot ([-1, Nreg+1],ones(1,2).* yvec(1),'k','LineWidth',LW,'LineStyle','--');
 %disp (sprintf('Calibrated mean SV=%1.3f',yvec(1)));
 aa.LineWidth = LW * 1.25;
 aa.XLim= [0 Nreg+1];  
-line(xvec,100*VV/sum(VV),'LineWidth',LW,'Color','r');
+aa.XTick = 1:26;
+aa.XTickLabel = RegionNames;
+aa.XTickLabelRotation = 90;
 end
 
 function [SV, SVci0, SVci1, pval, Z, aver] = StatInference (BLset,calib)
