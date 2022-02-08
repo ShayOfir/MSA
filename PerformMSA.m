@@ -1,8 +1,8 @@
 
-function [SV, Calib, coal, Bset, Lset]=PerformMSA (xy, pdepth, nBS, alpha, varargin)
+function [SV, Calib, coal, Bset, Lset]=PerformMSA (xy, pdepth, nBS, alpha, TOP, varargin)
 %% Performs Multi-perturbation Shapley-value Analysis on a dataset
 %
-%  [SV, Calib, coal, Bset, Lset] = PerformMSA (xy, pdepth, nBS, alpha [,alternative_predictor])
+%  [SV, Calib, coal, Bset, Lset] = PerformMSA (xy, pdepth, nBS, alpha, TOP, [optimization, alternative_predictor, normalization]] )
 %
 % INPUT:
 %   xy - matrix in size of (n, m+1); whereas 'n' is number of
@@ -25,18 +25,33 @@ function [SV, Calib, coal, Bset, Lset]=PerformMSA (xy, pdepth, nBS, alpha, varar
 %
 %    alpha - type I error level. Default is 0.05
 %
+%    optmization: 'gpu' : use GPU if exist, else use parallel CPUs
+%    [Default]
+%                 'par'  : enforce use of parallel CPUs, even if GPU exists
+%                 'none' : do not use any optimization (no parallel CPUs,
+%                 no GPUs)
+%
 %    alternative_predictor - optional. You can override the built-in
 %    predictor by providing the Matlab machine-learning model here.
 %    Any kind of ML model or even non-model structures, as long as they contain
 %    the a method named 'predictFcn' which obey the following sytnax:
 %
-%    y = alternative_predictor.predictFcn (XX); 
+%    y = alternative_predictor.predictFcn (XX);
 %    whereas
 %        XX - vector of m brain regions (same as size(xy,2)-1). Each is either 0 (inactive) or 1
 %        (active)
 %        y - predicted behavioral score, in the same units of the original
 %        behavioral scores of xy(:,end)
 %
+%   normalization - (Default = 1). This option controls the scaling of
+%   lesion data. The options are:
+%       0 - No scaling (NOT RECOMMENDED! Use it only if you apply your
+%       scaling before sending it to PerfromMSA.
+%       1 - (Default) Each lesion coloumn is divided by its max 
+%       2 - lesion columns are smoothed by dividing them by 10 and rounding
+%       before dividing by maximal value. This option is under
+%       investigation.
+
 %  OUTPUT:
 %   NOTE: Shapley values are computed using potentials method, hence SV of
 %   a given depth 'p' is a function of all depths from 1 to 'p'. Hence
@@ -133,7 +148,9 @@ function [SV, Calib, coal, Bset, Lset]=PerformMSA (xy, pdepth, nBS, alpha, varar
 % 
 % COMPATABILITY: The code uses parallel computing toolbox for running the core
 % functions on multiple CPU cores. The code was tested on computers with
-% intel(R) i5 with 4 cores and up, running Matlab R2019b.
+% intel(R) i5 and i7 with 4, 6 and 8 cores with Matlab versions: R2019b,
+% R2020a. The GPU option was tested on NVIDIA Quadro T1000 card with 4GB of memory
+
 %
 % Download most updated version from:
 % https://github.com/ShayOfir/MSA
@@ -143,24 +160,56 @@ function [SV, Calib, coal, Bset, Lset]=PerformMSA (xy, pdepth, nBS, alpha, varar
 % BSD 3-Clause License. Copyright (c) 2020, ShayOfir. All rights reserved.
 % For details: https://github.com/ShayOfir/MSA/blob/master/LICENSE.txt
 
+    global nc_data
+    nc_data = [];
+    
+    %GPU Memory parameters
+    global chunk_size
+    chunk_size = NaN;
+    global nchunks
+    nchunks = 1;
+    normalize_op = 1;
+    
+    if gpuDeviceCount > 0
+            def_optimize = 'gpu';
+            [chunk_size, nchunks] = perform_GPU_memory_check(pdepth,xy);
+    else
+            def_optimize = 'par';
+    end
+
     if isempty(varargin) 
         alt_pred = [];
+        optimize = def_optimize;
+        normalize_op = 1;
     else
-        alt_pred = varargin{1} ;
+        if length(varargin)>=1
+            optimize = varargin{1};
+            alt_pred = [];
+            if isempty(optimize) || ~(strcmpi(optimize,'gpu') || strcmpi(optimize,'par') || strcmpi(optimize,'none'))
+               optimize = def_optimize;
+            end
+        end
+        if length(varargin)>=2
+           alt_pred = varargin{2} ;
+        end
+        if length(varargin)>=3
+            normalize_op = varargin{3};
+        end
                           
     end
-    [SV, coal, Calib] = Compute_ShapleyVector_Bound (xy, pdepth(end), alt_pred);
+    
+    [SV, coal, Calib] = Compute_ShapleyVector_Bound (xy, pdepth(end), TOP, optimize, alt_pred, normalize_op);
     Bset = cell(1,pdepth(end));
     Lset = cell(1,pdepth(end));
     if nBS > 0
         for p=pdepth
             %disp(sprintf('Computing depth %d',p));
-            Bset{p} = Compute_Bootstrap(xy, SV, p, nBS, alpha, alt_pred);
+            Bset{p} = Compute_Bootstrap(xy, SV, p, nBS, alpha, TOP, optimize, alt_pred, normalize_op);
         end
     end
     if nBS == -1
         for p=pdepth           
-            Lset{p} = Compute_LOO(xy, SV, p, alpha, alt_pred);
+            Lset{p} = Compute_LOO(xy, SV, p, alpha, TOP, optimize, alt_pred, normalize_op);
         end        
     end
 end
@@ -190,6 +239,15 @@ end
  mode1 = NaN;
  
 sigmag=[.125 .25 .50 1]*((MM1g-mm1g)/2);
+if sigmag == 0
+    %vector is alrady calibtrated
+    calibYY = YY;
+    aver = mean(YY);
+    mode1 = YY(1);
+    factor1 = 1;
+    calib_stat = 1;
+    return
+end
 
 xg = zeros(1000,4);
 fg = zeros(1000,4);
@@ -228,10 +286,10 @@ calibYY=(aver+factor1*(YY-aver))*(1+perc*(100/length(YY))/aver);
  end
 
 
-function Lset = Compute_LOO (datum, SV, pdepth ,alpha, varargin)
+function Lset = Compute_LOO (datum, SV, pdepth ,alpha, TOP, optimize, alt_pred, normalize_op)
 %% Compute confidence interval for Shapley vector using leave-one-out method
 %
-%       Lset = Compute_LOO (datum, SV, pdepth, alpha [, alt_pred])
+%       Lset = Compute_LOO (datum, SV, pdepth, alpha [,optmize, alt_pred])
 %
 % INPUT:
 %    datum - same 'xy' in Perform_MSA()
@@ -268,14 +326,10 @@ function Lset = Compute_LOO (datum, SV, pdepth ,alpha, varargin)
 %           CI: the same as CIcali but with raw values instead of
 %                   calibrated
 %  
-%           LOO - matrix of all SV produced by beave-one-outs (the first
+%           LOO - matrix of all SV produced by leave-one-outs (the first
 %           row correspons to leave out 1st patient and so on)
 %
-if isempty(varargin) || isempty(varargin{1})
-    alt_pred = [];
-else
-    alt_pred = varargin{1};
-end
+
 
 UU = pdepth;
 Nbig = 100000;
@@ -291,7 +345,7 @@ SHest1LOO = zeros(m,n);
 for qqq=1:n
     disp(['Computing LOO-Shapley...',int2str(qqq),'/',int2str(n)]);           
     datum=datamatrix(II~=qqq,:); %each time leave one patient out
-    SHest = Compute_ShapleyVector_Bound (datum, pdepth, alt_pred); %compute SV for the leave-one-out dataset
+    SHest = Compute_ShapleyVector_Bound (datum, pdepth, TOP, optimize, alt_pred, normalize_op); %compute SV for the leave-one-out dataset
     SHest1LOO(:,qqq) = SHest(UU,:)';    
 end
 Lset.LOO = SHest1LOO;
@@ -334,7 +388,7 @@ Lset.CIcalib=(100/(mm*m))*[calibYY'-tinv(1-alpha/2,n-1)*Lset.stdest(:,2)*factor1
 end
 
 
-function Bset = Compute_Bootstrap (datum, SV, pdepth, nBS, alpha, varargin)
+function Bset = Compute_Bootstrap (datum, SV, pdepth, nBS, alpha, TOP, optimize, alt_pred, normalize_op)
 %% Compute confidence interval for Shapley vector using modified bootstrap
 % method (with hump analysis)
 %
@@ -381,11 +435,7 @@ function Bset = Compute_Bootstrap (datum, SV, pdepth, nBS, alpha, varargin)
 %       in the 'xy' was resampled. Values usually span between 0 to 3.
 %
 
-if isempty(varargin) || isempty(varargin{1})
-    alt_pred = [];
-else
-    alt_pred = varargin{1}; 
-end
+
 Nbig = 100000;
 UU = pdepth;
 datamatrix = datum;
@@ -404,7 +454,7 @@ for qqq=1:nBS
     if mod(qqq,10)==0 %Prints every 10 bootstraps, thus saving some display space...
         fprintf('Computing BS-Shapley... %d/%d\n',qqq,nBS);           
     end
-    SHest  = Compute_ShapleyVector_Bound (datamatrix(index1,:), pdepth, alt_pred);    
+    SHest  = Compute_ShapleyVector_Bound (datamatrix(index1,:), pdepth, TOP, optimize, alt_pred, normalize_op);    
     SHest1(:,qqq)=SHest(UU,:)';    
 end
 
@@ -562,14 +612,26 @@ end
 
 end
 
+function nc = fast_nchoosek(m,nR,max_nR)
+global nc_data
+if isempty(nc_data)
+    %generate using 'slow' nchoosek:
+    for k=1:max_nR
+        nc_data{k} = nchoosek(1:m,k);
+    end
+end
+%nchoosek was already calculated, so load the data
+nc = nc_data{nR};
+end
 
-function [SV, SaveCoal, Calib] = Compute_ShapleyVector_Bound(datum, pdepth, varargin)
+
+function [SV, SaveCoal, Calib] = Compute_ShapleyVector_Bound(datum, pdepth, TOP, optimize, alt_pred, normalize_op)
 %
-%  [SV, SaveCoal, Calib] = Compute_ShapleyVector_Bound(datum, pdepth, alternative_predictor)
+%  [SV, SaveCoal, Calib] = Compute_ShapleyVector_Bound(datum, pdepth, vectorize, alternative_predictor, normalize)
 %
 % Input:
 %       datum - matrix of [patients * ROIS; Behavior]
-%       pdepth: perturbation depth.
+%       pdepth: perturbation depth
 %       alternative_predictor: trained ML model object. See PerformMSA().
 %
 
@@ -583,84 +645,121 @@ function [SV, SaveCoal, Calib] = Compute_ShapleyVector_Bound(datum, pdepth, vara
 %                               vector in SV).
 %   The formula for calibration is :  CalibratedSV = aver + (factor1 * rawSV - aver)
 
-if isempty(varargin) || isempty(varargin{1})
-    alt_pred = [];
+if gpuDeviceCount > 0 && strcmpi(optimize,'gpu') && isempty(alt_pred)
+    prepare_predictor = 1;
 else
-    alt_pred = varargin{1}; 
+    prepare_predictor = 0;
+end
+if strcmpi(optimize,'none')
+    parallel = 0;
+else
+    parallel = 1;
 end
 
+%GPU memory parameters, relevant for GPU only
+global chunk_size
+global nchunks
 
-datum=Prepare_Dataset_ForPrediction(datum, 1);
-www=size(datum);
-nn=www(1); %no. of patients
-
-% Input number NP of permutations wanted
+datum=Prepare_Dataset_ForPrediction(datum, TOP, normalize_op);
 Xdat = datum(:,1:end-1);
-[~,m]=size(Xdat);
+[n,m]=size(Xdat);
+
+%The following lines are parameters of the predictor, which were moved here
+%for code acceleration  for CPU
+BB = 5;
+CC = 0;
+fast_ones = ones(1,m);
+fast_param.CCmat = ones(n,1).*CC;
+fast_param.BBmat = ones(n,1).*BB;
+fast_param.preXXmat = ones(n,m);
+
 Vdat = datum(:,end);
 TOP = max(Vdat);
 MAX_DMG_REGIONS = pdepth;
  Vest = cell(1,MAX_DMG_REGIONS);  
- %alldist = cell(1,MAX_DMG_REGIONS);
- coalitions = cell(1,MAX_DMG_REGIONS);
- for nR = 1:MAX_DMG_REGIONS
-     %disp(['Calculating Depth ' num2str(nR)]);
-     coalitions{nR} = nchoosek(1:m,nR); %All possible coalitions with nRegions out of m
-     NCoal = size(coalitions{nR},1);     
-     Vest{nR} = zeros(1,NCoal);
-     %alldist{nR} = zeros(NCoal,size(Xdat,1));
-     %Compute prediction for all coalitions:
-     VestPar = Vest{nR};
-     coalitionsPar = coalitions{nR};
-     DistPar = zeros(size(Xdat,1),NCoal);
-     %fprintf('\nApplying predictor for depth=%d',nR);     
-     if isempty(alt_pred)
-         %K-NN related Predictor
-        parfor k=1:NCoal
-             XX = ones(1,m);
-            XX(coalitionsPar(k,:)) = 0;%Zero the chosen regions  
-            [VestPar(k), DistPar(:,k)] = ApplyPredictor(XX,Xdat,Vdat);          
+if prepare_predictor     
+   [Vest, coalitions, SaveCoal] = prepare_predictions(datum, pdepth, chunk_size, nchunks);
+else
+    %Compute prediction using CPU
+    
+    % Input number NP of permutations wanted
+    
+     %alldist = cell(1,MAX_DMG_REGIONS);
+     coalitions = cell(1,MAX_DMG_REGIONS);
+     for nR = 1:MAX_DMG_REGIONS
+         %disp(['Calculating Depth ' num2str(nR)]);
+         coalitions{nR} = fast_nchoosek(m,nR,MAX_DMG_REGIONS); %nchoosek(1:m,nR); %All possible coalitions with nRegions out of m
+         NCoal = size(coalitions{nR},1);     
+         Vest{nR} = zeros(1,NCoal);
+         %alldist{nR} = zeros(NCoal,size(Xdat,1));
+         %Compute prediction for all coalitions:
+         VestPar = Vest{nR};
+         coalitionsPar = coalitions{nR};
+         DistPar = zeros(size(Xdat,1),NCoal);
+         %fprintf('\nApplying predictor for depth=%d',nR);     
+         if isempty(alt_pred)
+             %K-NN related Predictor
+             if parallel
+                parfor k=1:NCoal
+                    XX = fast_ones;%ones(1,m);
+                    XX(coalitionsPar(k,:)) = 0;%Zero the chosen regions  
+                    [VestPar(k), DistPar(:,k)] = ApplyPredictor(XX,Xdat,Vdat,fast_param);          
+                end
+             else
+               for k=1:NCoal
+                    XX = fast_ones;%ones(1,m);
+                    XX(coalitionsPar(k,:)) = 0;%Zero the chosen regions  
+                    [VestPar(k), DistPar(:,k)] = ApplyPredictor(XX,Xdat,Vdat,fast_param);          
+               end
+             end
+         else
+            for k=1:NCoal
+                %Alternative Predictor: trained on damage and not on activity,
+                %so XX is reversed
+                XX = ones(1,m);
+                XX(coalitionsPar(k,:)) = 0;%Zero the chosen regions    
+                VestPar(k) = alt_pred.predictFcn(XX);                
+            end         
         end
-     else
-        parfor k=1:NCoal
-            %Alternative Predictor: trained on damage and not on activity,
-            %so XX is reversed
-            XX = ones(1,m);
-            XX(coalitionsPar(k,:)) = 0;%Zero the chosen regions    
-            VestPar(k) = alt_pred.predictFcn(XX);                
-        end         
-    end
-     Vest{nR} = VestPar;
-     SaveCoal.Coal{nR} = coalitionsPar;
-     SaveCoal.Vest{nR} = VestPar;
-     SaveCoal.Dist{nR} = DistPar';
- end     
+         Vest{nR} = VestPar;
+         SaveCoal.Coal{nR} = coalitionsPar;
+         SaveCoal.Vest{nR} = VestPar;
+         SaveCoal.Dist{nR} = DistPar';
+     end   
+end
+
  VVest = zeros(MAX_DMG_REGIONS,m); 
  pre1SHest = zeros(MAX_DMG_REGIONS,m);
- preSHest = zeros(MAX_DMG_REGIONS,m);
  for region=1:m
      for nR=1:MAX_DMG_REGIONS
          %find all coalitions in which region m is present
-         indices = find(sum(coalitions{nR}~=region,2)==nR);
-         %Compute mean of(Tij/k-1)          
-         VVest(nR,region) = mean(Vest{nR}(indices));
+         if nR < m
+            indices = find(sum(coalitions{nR}~=region,2)==nR);
+            %Compute mean of(Tij/k-1) 
+            VVest(nR,region) = mean(Vest{nR}(indices));
+         else
+            VVest(nR,region) = 0; %by definition, v(empty coalition) is 0
+         end 
+            
+         
+         
          % Compute Sum[Tij/1 + Tij/2 + ... Tij/k]
          if nR == 1 
-            pre1SHest(nR,region) = VVest(nR,region);
-            preSHest(nR,region) = pre1SHest(nR,region) - VVest(nR,region)/m;
+            pre1SHest(nR,region) = VVest(nR,region)/nR;
+         %   preSHest(nR,region) = pre1SHest(nR,region) - VVest(nR,region)/m;
          else  
             pre1SHest(nR,region) = pre1SHest(nR-1,region) + VVest(nR,region)/nR;
-            preSHest(nR,region) = pre1SHest(nR,region)- VVest(nR,region)/m;
-         end
-         
-     end
+         %  preSHest(nR,region) = pre1SHest(nR,region)- VVest(nR,region)/m;
+         end                       
+     end    
+     pre1SHest(MAX_DMG_REGIONS,region) = pre1SHest(MAX_DMG_REGIONS,region)- VVest(MAX_DMG_REGIONS,region)/m;
  end
  %Compute mean TTi
  meanest = zeros(1,MAX_DMG_REGIONS);    
  SHest = zeros(MAX_DMG_REGIONS,m);    
  for j=1:MAX_DMG_REGIONS
-    meanest(j)=mean(preSHest(j,:));       
-    SHest(j,:)=TOP/m+preSHest(j,:)-meanest(j);        
+    meanest(j)=mean(pre1SHest(j,:));       
+    SHest(j,:)=TOP/m+pre1SHest(j,:)-meanest(j);        
  end    
  SV = SHest;
  for j=1:size(SV,1)
@@ -668,7 +767,7 @@ MAX_DMG_REGIONS = pdepth;
  end
 end
 
-function xp = Prepare_Dataset_ForPrediction (x, varargin)
+function xp = Prepare_Dataset_ForPrediction (x, TOP, varargin)
 %% Prepares raw data for prediction: normalizes damage, transform it to extent of activity and adds intact and zero patients
 % 
 % USE:
@@ -679,7 +778,8 @@ function xp = Prepare_Dataset_ForPrediction (x, varargin)
 %       x: matrix of n patients X (m regions + 1 behavioral score)
 %       normalize:
 %                 0= Do no normalize
-%                 1= normalize (default)
+%                 1= normalize to max(default)
+%                 2= smooth and than normalize
 %       xp - matrix of n+2 pateints X (m regions + 1 behavioral score) 
 % 
 % NOTE: We highly recommend normalizing the damage. Our trials showed that
@@ -692,19 +792,24 @@ if isempty(varargin)
 else
     normalize = varargin{1};
 end
-if normalize 
-    x=[x(:,1:end-1)./(ones(n,1)*max(x(:,1:end-1))), x(1:n,end)];%Normalizes damage data
+if normalize > 1
+    %smooth before normalizing
+    normx = round(x(:,1:end-1) / 10);
+    x = [normx, x(:,end)];
+end
+if normalize > 0
+    x=[x(:,1:end-1)./(ones(n,1)*max(x(:,1:end-1))), x(:,end)];%Normalizes damage data
 end
 
 x(isnan(x)) = 0;
 x(:,1:end-1) = 1 - x(:,1:end-1);
-TOP = max(x(:,end));
+%TOP = max(x(:,end));
 xp = x;
 xp(n+1,:) = [zeros(1,m), 0]; %Add fully-damaged patient
 xp(n+2,:) = [ones(1,m), TOP]; %Add intact patient
 end
 
-function [V1est, dista1] = ApplyPredictor (XX, Xdat, Vdat)
+function [V1est, dista1] = ApplyPredictor (XX, Xdat, Vdat, param)
 %% Apply inherent predictor to data
 % USE:
 % 
@@ -723,18 +828,144 @@ function [V1est, dista1] = ApplyPredictor (XX, Xdat, Vdat)
 
 
 %default value for parameters:
+
+
 b= 15;
-BB= 5;
-CC =0;
-TOP = max(Vdat);
+%BB= 5;
+%CC =0;  
+%TOP = max(Vdat);
 n = size(Xdat,1);
-CCmat = ones(n,1)*CC;
-BBmat = repmat(BB,n,1);
-XXmat = repmat(XX,n,1);                
-dista1 = min((sum((Xdat - XXmat).^2,2) - CCmat),BBmat);
+%CCmat = ones(n,1)*CC;
+%BBmat = repmat(BB,n,1);
+%XXmat = repmat(XX,n,1);                
+XXmat = XX .* param.preXXmat;
+dista1 = min((sum((Xdat - XXmat).^2,2) - param.CCmat),param.BBmat);
 W = (exp(-b*dista1))';
 gam2 = sum(XX)/sum(W*Xdat);
 gam3 = min(1,1/max(gam2*W*Xdat));
 V1est=gam3*gam2*sum(W.*Vdat');
+end
+
+function [chunk_size, nchunks] = perform_GPU_memory_check (pdepth,xy)
+    
+    safety_zone = 0.1*10^9; %Residual memory after chunk is stroed
+    MemCoef = 13;
+
+    sz = size(xy);
+    m = sz(2)-1; %no. of regions, elminate behavior column
+    n = sz(1)+2; %no. of patients + 2 pseudo patients
+    
+    %Compute number of coalitions
+    bigNNCoal = 0;
+    for k=1:pdepth
+        bigNNCoal = bigNNCoal + nchoosek(m,k);
+    end
+    
+    if gpuDeviceCount  == 0 
+        % No GPU
+        chunk_size = bigNNCoal;
+        nchunks = 1;
+    else
+        % There is GPU
+        
+        GPU = gpuDevice(1);
+        memory_left = GPU.AvailableMemory;
+
+        memory_req = MemCoef * bigNNCoal * m * n;
+        if memory_left >= memory_req + safety_zone %required memory is lower than available memory with grace of 200MB        
+            chunk_size = bigNNCoal;
+            nchunks = 1;
+        else
+            chunk_size = floor((memory_left - safety_zone)/(MemCoef*m*n));
+            nchunks = ceil(bigNNCoal / chunk_size);
+        end
+    end
+disp (['[GPU] No. of memory chunkes=',num2str(nchunks)]);
+end
+
+function [Vest, coalitions, SaveCoal] = prepare_predictions (xy, pdepth, chunk_size, nchunks)
+
+%Prepare data for prediction
+%pxy = salone_Prepare_Dataset_ForPrediction2(xy);
+pxy=xy;
+px = pxy(:,1:end-1);
+py = pxy(:,end);
+[n,m]=size(px);
+
+%Compute all the working-state for the desired perturbation depth
+coalitions = cell(1,pdepth);
+NCoals = zeros(1,pdepth);
+
+for nR=1:pdepth
+    coalitions{nR} = fast_nchoosek(m,nR,pdepth);
+    NCoal(nR) = size(coalitions{nR},1);
+end
+
+bigNNCoal = sum(NCoal);
+bigXX = ones(m,bigNNCoal); %all working states
+
+from_index = 1;
+for nR=1:pdepth
+    to_index = from_index + NCoal(nR) - 1;
+    xx = ones(m,NCoal(nR));
+    offset = repmat([0:m:m*NCoal(nR)-1]',1,nR);
+    coal_linear = coalitions{nR} + offset;
+    xx(coal_linear) = 0;
+    bigXX(:,from_index:to_index) = xx;
+    from_index = to_index+1;
+end
+
+b = 15;
+BB=5;
+%TOP = max(py);
+sz = size(bigXX);
+big_aXX = reshape(bigXX,[1,sz(1),sz(2)]); %3D vesion of XX
+
+V1est = zeros(bigNNCoal,1);
+from_index = 1;
+gpud = struct();
+for chunk=1:nchunks
+    if chunk < nchunks
+        to_index = from_index + chunk_size-1;
+    else
+        to_index = bigNNCoal;
+    end
+    NNCoal = to_index - from_index+1;
+    XX = bigXX(:,from_index:to_index);
+    aXX = big_aXX(:,:,from_index:to_index);
+     
+    gpud.aXX = gpuArray(single(aXX));
+    gpud.XX = gpuArray(single(XX));
+    gpud.BBmat = BB .* ones(n,1,NNCoal,'single','gpuArray'); %%
+    gpud.px = gpuArray(single(px));
+    gpud.Xdat = repmat(gpud.px,[1,1,NNCoal]); %% 
+    gpud.py = gpuArray(single(py));
+    gpud.XXmat = repmat(gpud.aXX,[n,1,1]); %%
+
+    
+    gpud.dista1 = squeeze(arrayfun(@min,sum((arrayfun(@minus,gpud.Xdat,gpud.XXmat)).^2,2),gpud.BBmat));
+    gpud.W = pagefun(@transpose,pagefun(@exp,-b.*gpud.dista1));   
+    gpud.step5 = pagefun(@transpose,gpud.W*gpud.px);
+    gpud.gam2 = sum(gpud.XX,1) ./ sum(gpud.step5,1);
+    gpud.gam3 = min(ones(1,NNCoal,'single','gpuArray'),1./max(gpud.gam2.*gpud.step5,[],1));
+    gpud.V1est = gpud.gam3.*(gpud.gam2.*sum(gpud.W.*repmat(gpud.py',NNCoal,1),2)');
+    V1est(from_index:to_index) = gather(gpud.V1est);
+    from_index = to_index+1;
+end
+
+
+from_index = 1;
+for nR=1:pdepth
+    to_index = from_index + NCoal(nR) - 1;
+    Vest{nR} = V1est(from_index:to_index);
+    SaveCoal.Coal{nR} = coalitions{nR};
+    SaveCoal.Vest{nR} = Vest{nR};
+    SaveCoal.Dist{nR} = Vest{nR}.*0; %gathering distance from GPU is inefficient
+    from_index = to_index+1;
+end
+
+
+
+
 end
 
