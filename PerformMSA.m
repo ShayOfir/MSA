@@ -2,7 +2,7 @@
 function [SV, Calib, coal, Bset, Lset]=PerformMSA (xy, pdepth, nBS, alpha, TOP, varargin)
 %% Performs Multi-perturbation Shapley-value Analysis on a dataset
 %
-%  [SV, Calib, coal, Bset, Lset] = PerformMSA (xy, pdepth, nBS, alpha, TOP, [optimization, alternative_predictor, normalization]] )
+%  [SV, Calib, coal, Bset, Lset] = PerformMSA (xy, pdepth, nBS, alpha, TOP, [optimization, alternative_predictor, normalization, b]] )
 %
 % INPUT:
 %   xy - matrix in size of (n, m+1); whereas 'n' is number of
@@ -25,8 +25,7 @@ function [SV, Calib, coal, Bset, Lset]=PerformMSA (xy, pdepth, nBS, alpha, TOP, 
 %
 %    alpha - type I error level. Default is 0.05
 %
-%    TOP - The score of an intact patient. Pay attention that PerformMSA
-%    assumes that the score of highly-injured patient is 0.
+%    TOP - behavioral score of intact patient 
 %
 %    optmization: 'gpu' : use GPU if exist, else use parallel CPUs
 %    [Default]
@@ -34,27 +33,30 @@ function [SV, Calib, coal, Bset, Lset]=PerformMSA (xy, pdepth, nBS, alpha, TOP, 
 %                 'none' : do not use any optimization (no parallel CPUs,
 %                 no GPUs)
 %
+%   normalization: Type of data scaling of lesion data.
+%                   0= Do not normalize (not recommended)
+%                   1= Normalize to max lesion load in each region
+%                   2= The same as 1 but apply smoothing of lesion load to
+%                   nearest 10% (supposed to provide more sensitivity to
+%                   differences between large and small lesions, but was
+%                   not shown to produce different results
+%
 %    alternative_predictor - optional. You can override the built-in
 %    predictor by providing the Matlab machine-learning model here.
 %    Any kind of ML model or even non-model structures, as long as they contain
 %    the a method named 'predictFcn' which obey the following sytnax:
 %
-%    y = alternative_predictor.predictFcn (XX);
+%    y = alternative_predictor.predictFcn (XX); 
+%
 %    whereas
 %        XX - vector of m brain regions (same as size(xy,2)-1). Each is either 0 (inactive) or 1
 %        (active)
 %        y - predicted behavioral score, in the same units of the original
 %        behavioral scores of xy(:,end)
 %
-%   normalization - (Default = 1). This option controls the scaling of
-%   lesion data. The options are:
-%       0 - No scaling (NOT RECOMMENDED! Use it only if you apply your
-%       scaling before sending it to PerfromMSA.
-%       1 - (Default) Each lesion coloumn is divided by its max 
-%       2 - lesion columns are smoothed by dividing them by 10 and rounding
-%       before dividing by maximal value. This option is under
-%       investigation.
-
+%    b - A parameter of the predictor. Default and recommended value is 15.
+%    Should be above 0 and probably below 20.
+%
 %  OUTPUT:
 %   NOTE: Shapley values are computed using potentials method, hence SV of
 %   a given depth 'p' is a function of all depths from 1 to 'p'. Hence
@@ -151,9 +153,7 @@ function [SV, Calib, coal, Bset, Lset]=PerformMSA (xy, pdepth, nBS, alpha, TOP, 
 % 
 % COMPATABILITY: The code uses parallel computing toolbox for running the core
 % functions on multiple CPU cores. The code was tested on computers with
-% intel(R) i5 and i7 with 4, 6 and 8 cores with Matlab versions: R2019b,
-% R2020a. The GPU option was tested on NVIDIA Quadro T1000 card with 4GB of memory
-
+% intel(R) i5 with 4 cores and up, running Matlab R2019b.
 %
 % Download most updated version from:
 % https://github.com/ShayOfir/MSA
@@ -171,7 +171,8 @@ function [SV, Calib, coal, Bset, Lset]=PerformMSA (xy, pdepth, nBS, alpha, TOP, 
     chunk_size = NaN;
     global nchunks
     nchunks = 1;
-    normalize_op = 1;
+    
+    
     
     if gpuDeviceCount > 0
             def_optimize = 'gpu';
@@ -179,40 +180,45 @@ function [SV, Calib, coal, Bset, Lset]=PerformMSA (xy, pdepth, nBS, alpha, TOP, 
     else
             def_optimize = 'par';
     end
-
-    if isempty(varargin) 
-        alt_pred = [];
-        optimize = def_optimize;
-        normalize_op = 1;
-    else
+    
+    %Default values
+    normalize_op = 1;
+    b_param = 15;
+    optimize = def_optimize;
+    alt_pred = [];
+    
+    if ~isempty(varargin)
+        %First parameter - optmization
         if length(varargin)>=1
             optimize = varargin{1};
-            alt_pred = [];
             if isempty(optimize) || ~(strcmpi(optimize,'gpu') || strcmpi(optimize,'par') || strcmpi(optimize,'none'))
-               optimize = def_optimize;
+                optimize = def_optimize;
             end
         end
-        if length(varargin)>=2
-           alt_pred = varargin{2} ;
-        end
+         if length(varargin)>=2
+            alt_pred = varargin{2} ;
+         end
         if length(varargin)>=3
             normalize_op = varargin{3};
         end
-                          
+        if length(varargin)>=4
+            b_param = varargin{4};
+        end
     end
-    
-    [SV, coal, Calib] = Compute_ShapleyVector_Bound (xy, pdepth(end), TOP, optimize, alt_pred, normalize_op);
+
+     
+    [SV, coal, Calib] = Compute_ShapleyVector_Bound (xy, pdepth(end), TOP, optimize, alt_pred, normalize_op, b_param);
     Bset = cell(1,pdepth(end));
     Lset = cell(1,pdepth(end));
     if nBS > 0
         for p=pdepth
             %disp(sprintf('Computing depth %d',p));
-            Bset{p} = Compute_Bootstrap(xy, SV, p, nBS, alpha, TOP, optimize, alt_pred, normalize_op);
+            Bset{p} = Compute_Bootstrap(xy, SV, p, nBS, alpha, TOP, optimize, alt_pred, normalize_op, b_param);
         end
     end
     if nBS == -1
         for p=pdepth           
-            Lset{p} = Compute_LOO(xy, SV, p, alpha, TOP, optimize, alt_pred, normalize_op);
+            Lset{p} = Compute_LOO(xy, SV, p, alpha, TOP, optimize, alt_pred, normalize_op, b_param);
         end        
     end
 end
@@ -289,7 +295,7 @@ calibYY=(aver+factor1*(YY-aver))*(1+perc*(100/length(YY))/aver);
  end
 
 
-function Lset = Compute_LOO (datum, SV, pdepth ,alpha, TOP, optimize, alt_pred, normalize_op)
+function Lset = Compute_LOO (datum, SV, pdepth ,alpha, TOP, optimize, alt_pred, varargin)
 %% Compute confidence interval for Shapley vector using leave-one-out method
 %
 %       Lset = Compute_LOO (datum, SV, pdepth, alpha [,optmize, alt_pred])
@@ -333,6 +339,12 @@ function Lset = Compute_LOO (datum, SV, pdepth ,alpha, TOP, optimize, alt_pred, 
 %           row correspons to leave out 1st patient and so on)
 %
 
+if isempty(varargin)
+    b_param = 15;
+else
+    b_param = varargin{1};
+end
+
 
 UU = pdepth;
 Nbig = 100000;
@@ -348,7 +360,7 @@ SHest1LOO = zeros(m,n);
 for qqq=1:n
     disp(['Computing LOO-Shapley...',int2str(qqq),'/',int2str(n)]);           
     datum=datamatrix(II~=qqq,:); %each time leave one patient out
-    SHest = Compute_ShapleyVector_Bound (datum, pdepth, TOP, optimize, alt_pred, normalize_op); %compute SV for the leave-one-out dataset
+    SHest = Compute_ShapleyVector_Bound (datum, pdepth, TOP, optimize, alt_pred, normalize_op, b_param); %compute SV for the leave-one-out dataset   
     SHest1LOO(:,qqq) = SHest(UU,:)';    
 end
 Lset.LOO = SHest1LOO;
@@ -391,12 +403,12 @@ Lset.CIcalib=(100/(mm*m))*[calibYY'-tinv(1-alpha/2,n-1)*Lset.stdest(:,2)*factor1
 end
 
 
-function Bset = Compute_Bootstrap (datum, SV, pdepth, nBS, alpha, TOP, optimize, alt_pred, normalize_op)
+function Bset = Compute_Bootstrap (datum, SV, pdepth, nBS, alpha, TOP, optimize, alt_pred, normalize_op, varargin)
 %% Compute confidence interval for Shapley vector using modified bootstrap
 % method (with hump analysis)
 %
 %
-%       Bset = Compute_Bootstrap (datum, SV, pdepth, nBS, alpha [, alternative_predictor])
+%       Bset = Compute_Bootstrap (datum, SV, pdepth, nBS, alpha, TOP, optimize, alternative_predictor, normalize_op [,b])
 %
 % INPUT:
 %        datum - dataset. see 'xy' in PerformMSA()
@@ -439,6 +451,13 @@ function Bset = Compute_Bootstrap (datum, SV, pdepth, nBS, alpha, TOP, optimize,
 %
 
 
+if isempty(varargin)
+    b_param = 15;
+else
+    b_param = varargin{1};
+end
+
+
 Nbig = 100000;
 UU = pdepth;
 datamatrix = datum;
@@ -457,7 +476,7 @@ for qqq=1:nBS
     if mod(qqq,10)==0 %Prints every 10 bootstraps, thus saving some display space...
         fprintf('Computing BS-Shapley... %d/%d\n',qqq,nBS);           
     end
-    SHest  = Compute_ShapleyVector_Bound (datamatrix(index1,:), pdepth, TOP, optimize, alt_pred, normalize_op);    
+    SHest  = Compute_ShapleyVector_Bound (datamatrix(index1,:), pdepth, TOP, optimize, alt_pred, normalize_op, b_param);    
     SHest1(:,qqq)=SHest(UU,:)';    
 end
 
@@ -628,14 +647,33 @@ nc = nc_data{nR};
 end
 
 
-function [SV, SaveCoal, Calib] = Compute_ShapleyVector_Bound(datum, pdepth, TOP, optimize, alt_pred, normalize_op)
+function [SV, SaveCoal, Calib] = Compute_ShapleyVector_Bound(datum, pdepth, TOP, optimize, alt_pred, normalize_op, varargin)
 %
-%  [SV, SaveCoal, Calib] = Compute_ShapleyVector_Bound(datum, pdepth, vectorize, alternative_predictor, normalize)
+%  [SV, SaveCoal, Calib] = Compute_ShapleyVector_Bound(datum, pdepth, TOP, optimize, alternative_predictor, normalize, b)
 %
 % Input:
 %       datum - matrix of [patients * ROIS; Behavior]
+%
 %       pdepth: perturbation depth
-%       alternative_predictor: trained ML model object. See PerformMSA().
+%
+%       
+%       TOP: the behavioral score of an intact brain
+%
+%       optimize (parallelization): either 'gpu' (GPU), 'par' (use multiple
+%       CPU cores) or 'none' (enforce single CPU core). The default is GPU
+%       and is usually the fastest.
+%
+%       alternative_predictor: trained ML model object. See
+%       PerformMSA_corrected(). ATTENTION: optmiziation is not supported
+%       for alternative predictors
+%
+%       normalize:    
+%                 0= Do no normalize
+%                 1= normalize to max(default)
+%                 2= smooth and than normalize
+%
+%       b: optional. Default is 15. Should be above 0 and probably below
+%       20.
 %
 
 % Output:
@@ -667,6 +705,12 @@ datum=Prepare_Dataset_ForPrediction(datum, TOP, normalize_op);
 Xdat = datum(:,1:end-1);
 [n,m]=size(Xdat);
 
+if isempty(varargin)
+    b = 15;
+else
+    b = varargin{1};
+end
+
 %The following lines are parameters of the predictor, which were moved here
 %for code acceleration  for CPU
 BB = 5;
@@ -681,7 +725,7 @@ TOP = max(Vdat);
 MAX_DMG_REGIONS = pdepth;
  Vest = cell(1,MAX_DMG_REGIONS);  
 if prepare_predictor     
-   [Vest, coalitions, SaveCoal] = prepare_predictions(datum, pdepth, chunk_size, nchunks);
+   [Vest, coalitions, SaveCoal] = prepare_predictions(datum, pdepth, chunk_size, nchunks, b);
 else
     %Compute prediction using CPU
     
@@ -706,13 +750,13 @@ else
                 parfor k=1:NCoal
                     XX = fast_ones;%ones(1,m);
                     XX(coalitionsPar(k,:)) = 0;%Zero the chosen regions  
-                    [VestPar(k), DistPar(:,k)] = ApplyPredictor(XX,Xdat,Vdat,fast_param);          
+                    [VestPar(k), DistPar(:,k)] = ApplyPredictor(XX,Xdat,Vdat,fast_param,b);          
                 end
              else
                for k=1:NCoal
                     XX = fast_ones;%ones(1,m);
                     XX(coalitionsPar(k,:)) = 0;%Zero the chosen regions  
-                    [VestPar(k), DistPar(:,k)] = ApplyPredictor(XX,Xdat,Vdat,fast_param);          
+                    [VestPar(k), DistPar(:,k)] = ApplyPredictor(XX,Xdat,Vdat,fast_param,b);          
                end
              end
          else
@@ -812,17 +856,20 @@ xp(n+1,:) = [zeros(1,m), 0]; %Add fully-damaged patient
 xp(n+2,:) = [ones(1,m), TOP]; %Add intact patient
 end
 
-function [V1est, dista1] = ApplyPredictor (XX, Xdat, Vdat, param)
+function [V1est, dista1] = ApplyPredictor (XX, Xdat, Vdat, param, varargin)
 %% Apply inherent predictor to data
 % USE:
 % 
-%       [Vest, dista1] = ApplyPredictor (XX, Xdat, Vdat)
+%       [Vest, dista1] = ApplyPredictor (XX, Xdat, Vdat, param [,b])
 %
 % INPUT:
 %       XX - binary coalition at length m (no. of regions)
 %       Xdat - working state matrix with +2 imaginary patients (perfectly intact
 %               and perfectly damaged): [patients, regions]. Use Prepare_Dataset_ForPrediction() to produce such matrix. 
 %       Vat - performance vector associated with Xdat
+%       param - a structure which contains pre-computed variables, to allow
+%       for code acceleration: .BBmat and .PreXXmat
+%       b - optional. b parameter. default is b = 15; should be above 0 and probably below 20. 
 %
 % OUTPUT:
 %       Vest - predicted behavioral score
@@ -832,8 +879,11 @@ function [V1est, dista1] = ApplyPredictor (XX, Xdat, Vdat, param)
 
 %default value for parameters:
 
-
-b= 15;
+if isempty(varargin)
+    b = 15;
+else
+    b = varargin{1};
+end
 %BB= 5;
 %CC =0;  
 %TOP = max(Vdat);
@@ -886,7 +936,34 @@ function [chunk_size, nchunks] = perform_GPU_memory_check (pdepth,xy)
 disp (['[GPU] No. of memory chunkes=',num2str(nchunks)]);
 end
 
-function [Vest, coalitions, SaveCoal] = prepare_predictions (xy, pdepth, chunk_size, nchunks)
+function [Vest, coalitions, SaveCoal] = prepare_predictions (xy, pdepth, chunk_size, nchunks, varargin)
+%% Apply predictions using GPU
+%
+% USE:
+%
+%        [Vest, coalitions, SaveCoal] = prepare_predictions (xy, pdepth, chunk_size, nchunks, varargin)
+%
+% INPUT:
+%           xy - matrix of lesion data and behavior (each row is a patient,
+%           each column is a brain region between 0 and 1, except of the
+%           last which contains the behavioral scores
+%
+%           pdepth - perturbation depth, should be between 1 and no. of
+%           regions (i.e., size(xy,1)-1)
+%       
+%           chunk_size, nchunk - size of the GPU memory that could be used in one
+%           chunk and number of chunks. These values are computed by the function
+%           'perform_GPU_memory_check'
+%
+%           b - optional. an hyperparameter. Default is b = 15. Should be
+%           above 0 and probably below 20.
+%
+
+if isempty(varargin)
+    b = 15;
+else
+    b = varargin{1};
+end
 
 %Prepare data for prediction
 %pxy = salone_Prepare_Dataset_ForPrediction2(xy);
@@ -918,7 +995,7 @@ for nR=1:pdepth
     from_index = to_index+1;
 end
 
-b = 15;
+%b = 15;
 BB=5;
 %TOP = max(py);
 sz = size(bigXX);
