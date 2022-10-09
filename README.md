@@ -1,7 +1,7 @@
 # MSA: Multi-perturbation Shapley Analysis Toolbox
 Authors: Shay Ofir-Geva and Isaac Meilijson.
 
-This is Matlab toolbox implements multi-perturbation Shapley-value analysis for lesion-behavior/symptom mapping (LBM).
+This Matlab toolbox implements multi-perturbation Shapley-value analysis for lesion-behavior/symptom mapping (LBM).
 
 ## Table of Contents
 * [General Info](#general-info)
@@ -11,9 +11,11 @@ This is Matlab toolbox implements multi-perturbation Shapley-value analysis for 
 
 
 # General Info
-Multi-perturbation Shapley-value analysis is a method for multivariate, game-theoretical [lesion-symptom mapping](https://www.nature.com/articles/nrn1521) (finding the neural correlates of certain symptom or behavior using anatomical lesion data of brain-injured patients and their behavioral measurements). A full an detailed descirption of the method could be found in the [here](https://www.mitpressjournals.org/doi/10.1162/0899766041336387) and [here](https://doi.org/10.1162/artl.2006.12.3.333), while an example for usage in lesion-symptom mapping could be found [here](10.1002/hbm.20797), [here](10.1186/s12868-016-0275-6) and [here](10.1002/hbm.23601) . This toolbox was implemented and fully presented in an article under review (a full reference will be included once the article is accepted and published). Shortly, Assuming that a network of brain regions are involved in a certain behavior, each brain region is considered as a player in a coalitional game, and the measured behavioral score when all regions are intact is the game worth. Shapley value is the unique fair division of the game's worth between players, and is usually computed using all the possible player-coalitions.  
+Multi-perturbation Shapley-value analysis is a method for multivariate, game-theoretical [lesion-symptom mapping](https://www.nature.com/articles/nrn1521) (finding the neural correlates of certain symptom or behavior using anatomical lesion data of brain-injured patients and their behavioral measurements). A full an detailed descirption of the method could be found in the [1](https://www.mitpressjournals.org/doi/10.1162/0899766041336387) and [2](https://doi.org/10.1162/artl.2006.12.3.333), while an example for usage in lesion-symptom mapping could be found [3](10.1002/hbm.20797), [4](10.1186/s12868-016-0275-6) and [5](10.1002/hbm.23601) . This toolbox was implemented and fully presented in the following article [6](https://doi.org/10.1002/hbm.26105) . Shortly, Assuming that a network of brain regions are involved in a certain behavior, each brain region is considered as a player in a coalitional game, and the measured behavioral score when all regions are intact is the game worth. Shapley value is the unique fair division of the game's worth between players, and is usually computed using all the possible player-coalitions.  
 
-The current implementation of MSA uses a uses only coalitions with a certain (user-defined) maximal perturbation depth (i.e., coalitions in which the number of injured / perturbed regions is limited), via a novel formula. This approach is beneficial from both biological and computation point of view. The performance of these coalitions is estimated using a prediction algorithm, related to K-nearest neighbours method, which could be replaced by any predictor the user desires (although we recommend against it to all but most advanced users). The main program recieves a matrix of patients' lesion and behavior data and several parameters (see [Input & Output](#input-output) section for detailes) and outputs the corresponding Shapley values, in addition to its calibrated version (which is used to overcome prediction bias) and inferential statistics (p-values, confidence intervals and others measures related to bootstrap or jacknife techniques).
+The current implementation of MSA uses a uses only coalitions with a certain (user-defined) maximal perturbation depth (i.e., coalitions in which the number of injured / perturbed regions is limited), via a novel formula. This approach is beneficial from both biological and computation point of view. The performance of these coalitions is estimated using a prediction algorithm, related to K-nearest neighbours method, which could be replaced by any predictor the user desires (although we recommend against it to all but most advanced users). Moreover, we show in [6](https://doi.org/10.1002/hbm.26105) that this appraoch produce consistent results, in contrast the "estimated MSA approach" [7](10.1002/hbm.24987).
+
+The main program recieves a matrix of patients' lesion and behavior data and several parameters (see [Input & Output](#input-output) section for detailes) and outputs the corresponding Shapley values, in addition to its calibrated version (which is used to overcome prediction bias) and inferential statistics (p-values, confidence intervals and others measures related to bootstrap or jacknife techniques).
 
 # Technologies
 The toolbox was created and tested using:
@@ -28,7 +30,7 @@ And the following matlab toolboxes:
 
 # Usage
 
-<pre><code>[SV, Calib, coal, Bset, Lset] = PerformMSA (xy, pdepth, nBS, alpha, TOP, [optimization, alternative_predictor, normalization_op])
+<pre><code>[SV, Calib, coal, Bset, Lset] = PerformMSA (xy, pdepth, nBS, alpha, TOP, [optimization, alternative_predictor, normalization_op, b])
 </code></pre>
 
 ## Input:
@@ -46,6 +48,7 @@ And the following matlab toolboxes:
   - 0 - No scaling (NOT RECOMMENDED! Use it only if you apply your scaling before sending it to PerfromMSA().
   - 1 - (Default) Each lesion coloumn is divided by its max 
   - 2 - lesion columns are smoothed by dividing them by 10 and rounding before dividing by maximal value. This option is under investigation.
+* __b__ : (Default: b=15). This is a exponential negative coeficient for the predictor weights. See [6](https://doi.org/10.1002/hbm.26105) (section 2.1.3, Prediction of Scores) for more details. It should recieve values larger than 0 and (empirically) smaller than 20 (values between 5 and 15 gave practically the same results for our datasets). Finding a way to automatically select the b-value is currently under active research. We recommend trying 2-3 values between 5 and 15 for your dataset (keeping other parameters contant) to make sure you get the same or almost the same results
 
 ## Output:
 * __SV__ : Shapley Vector. This is actually a matrix with N rows and M columns, when N is pdepth and M is no. of regions. Each row is Shapley vector for a perturbation depth from 1 to pdepth. Hence, SV(end,:) will get you the Shapley-values for the requested pdepth.
@@ -74,7 +77,7 @@ And the following matlab toolboxes:
   - __LOO__ - matrix of M x N whereas M is the no. of regions and N is the no. of patients and contains the resultant Shapley vectors for each leave-one-out operation.
 
 ## Example
-Two real-world [cohorts](https://doi.org/10.1371/journal.pone.0219738) are supplied with the toolbox and could be found in the file `ClinicalCohorts.mat`: `LHD_xy` and `RHD_xy` includes anatomic and behavioral (Fugl-Meyer Score, Upper limb) of 58 left-hemispheric and 49 right-hemispheric first-stroke patients, assesed in the subacute phase (between 1 to 3 months post-stroke). The Fugl-Meyer score of the upper limb range is [0, 66], whereas 66 is normal function. The region names were defined according to the [Automated Anatomic Labeling atlas (AAL)]( http://dx.doi.org/10.1006/nimg.2001.0978) and [White-matter atlas based on DTI](http://dx.doi.org/10.1016/j.neuroimage.2007.12.035). The variable `RegionNames` contains the name of each region, and file `parcellation.docx` describes the exact parcellation.
+Two real-world [cohorts](https://doi.org/10.1371/journal.pone.0219738) are supplied with the toolbox and could be found in the file `ClinicalCohorts.mat`: `LHD_xy` and `RHD_xy` includes anatomic and behavioral (Fugl-Meyer Score, Upper limb) of 58 left-hemispheric and 49 right-hemispheric first-stroke patients, assesed in the subacute phase (between 1 to 3 months post-stroke). The Fugl-Meyer score of the upper limb range is [0, 66], whereas 66 is normal function. The region names were defined according to the [Automated Anatomic Labeling atlas (AAL)]( http://dx.doi.org/10.1006/nimg.2001.0978) and [JHU White-matter atlas based on DTI](http://dx.doi.org/10.1016/j.neuroimage.2007.12.035). The variable `RegionNames` contains the name of each region, and file `parcellation.docx` describes the exact parcellation.
 
 You can also refer to the script `msa_demo.m` (which demonstates ground-truth simulation) to see some suggested ways for usage, as well as plotting of the results.
 
